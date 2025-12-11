@@ -2,7 +2,7 @@
 
 # GitHub Container Registry settings
 REGISTRY := ghcr.io
-OWNER := tfishwick
+OWNER := nanofleets
 BACKEND_IMAGE := $(REGISTRY)/$(OWNER)/vibechat-backend
 FRONTEND_IMAGE := $(REGISTRY)/$(OWNER)/vibechat-frontend
 TAG := latest
@@ -12,26 +12,22 @@ build: build-backend build-frontend
 
 # Build backend image
 build-backend:
-	docker buildx build \
-		--platform linux/amd64,linux/arm64 \
+	docker build \
+		--platform linux/arm64 \
 		-t $(BACKEND_IMAGE):$(TAG) \
 		-f backend/Dockerfile \
 		backend/
 
 # Build frontend image
 build-frontend:
-	docker buildx build \
-		--platform linux/amd64,linux/arm64 \
+	docker build \
+		--platform linux/arm64 \
 		-t $(FRONTEND_IMAGE):$(TAG) \
 		-f frontend/Dockerfile \
 		frontend/
 
-# Setup buildx for multi-platform builds
-setup-buildx:
-	docker buildx create --name vibechat-builder --driver docker-container --bootstrap --use || docker buildx use vibechat-builder
-
 # Push both images
-push: setup-buildx push-backend push-frontend
+push: push-backend push-frontend
 
 # Push backend image
 push-backend:
@@ -40,12 +36,12 @@ push-backend:
 		exit 1; \
 	fi
 	echo $(GH_TOKEN) | docker login $(REGISTRY) -u $(OWNER) --password-stdin
-	docker buildx build \
-		--platform linux/amd64,linux/arm64 \
+	docker build \
+		--platform linux/arm64 \
 		-t $(BACKEND_IMAGE):$(TAG) \
 		-f backend/Dockerfile \
-		--push \
 		backend/
+	docker push $(BACKEND_IMAGE):$(TAG)
 
 # Push frontend image
 push-frontend:
@@ -54,12 +50,12 @@ push-frontend:
 		exit 1; \
 	fi
 	echo $(GH_TOKEN) | docker login $(REGISTRY) -u $(OWNER) --password-stdin
-	docker buildx build \
-		--platform linux/amd64,linux/arm64 \
+	docker build \
+		--platform linux/arm64 \
 		-t $(FRONTEND_IMAGE):$(TAG) \
 		-f frontend/Dockerfile \
-		--push \
 		frontend/
+	docker push $(FRONTEND_IMAGE):$(TAG)
 
 # Start development environment
 dev:
@@ -72,4 +68,3 @@ down:
 # Clean up
 clean:
 	docker-compose down -v
-	docker buildx rm vibechat-builder || true
