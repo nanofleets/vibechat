@@ -1,21 +1,32 @@
-# Vibe Chat
+# Vibe Chat Example App
 
-Yeah, I vibe coded a chat app..
+Example app for NOA/Nanofleets.
 
-## Project Layout
+## Deploying to a NOA cluster
 
-- A docker-compose.yaml file to run the app with a single command for development. This also generates the images to be deployed. But it prod it's all setup to be hot reloaded and seeded with test data
+Apps are deployed to NOA as containers. There are images for vibechat already built at [text](https://github.com/orgs/nanofleets/packages?tab=packages&q=vibechat) that we'll use.
 
-## The App
+There are two containers for vibechat, backend and frontend. Redis is required as well.
 
-- When the user opens the app a cookie is checked if they already have a nick chosen, if not they are prompted to choose a nick, which is stored in a cookie. A web socket is then opened to the server to join the chat and receive messages.
-- When a user chooses a nick a "device fingerprint" is generated. When hovering over the users nick, this fingerprint is shown. This is to help identify users in the chat.
-- Redis and redis pub/sub are used to broadcast messages to all connected clients.
-- The header of the app layout is like this: "[vibechat] -> {nick} [socket status}"
-- The only page is /, which is a chat interface, on the left are users in the chat, and on the right is the chat messages.
-- when a chat message is sent, it's posted to /api/chat/messages (a go api), and is saved to redis (with a ttl of 24 hours) and published to the pub/sub channel, which all connected clients are subscribed to.
+If you want to try this out, create your own free NOA cluster at [nanofleets.com](https://nanofleets.com), setup the CLI, and run these commands:
 
-## Requirements
+```sh
+# I suggest having the console open while deploying to see the progress
+noa console open
 
-- Running `docker-compose up` brings up a full working development environment with hot reloading for redis, the react (use vite), and the go api.
-- All components are built to an image with a simple command to push them to a gchr, maybe `make build push`, there will be two images. vibechat-backend, vibechat-frontend
+# Add redis (a "named instance" can be used for persistant storage, we'll just use the overlay fs for now)
+noa app add redis
+
+# Add the vibechat backend
+noa app add ghcr.io/nanofleets/vibechat-backend:latest -e REDIS_URL=redis:6379 --path=/api
+
+# Add the frontend
+noa app add ghcr.io/nanofleets/vibechat-frontend:latest --path=/
+
+# See if it works! Go to your cluster, you can get your cluster url with
+noa status
+
+# Finally, open the console and go to "Gateway", leave this open and run some bots
+docker run --rm ghcr.io/nanofleets/vibechat-utils:latest bots --count=5 --interval=10 \
+  --url=https://sypq.nanofleets.com
+```

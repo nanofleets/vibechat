@@ -77,13 +77,25 @@
   background-color: #333;
 }
 
+.user-info {
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+}
+
 .user-nick {
   color: #00aaff;
   font-weight: bold;
 }
 
-.user-fingerprint {
+.user-tagline {
   color: #888;
+  font-size: 0.8rem;
+  font-style: italic;
+}
+
+.user-fingerprint {
+  color: #666;
   font-size: 0.75rem;
   font-family: 'Courier New', monospace;
 }

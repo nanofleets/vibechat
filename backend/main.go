@@ -7,6 +7,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"sort"
 	"sync"
 	"time"
 
@@ -35,7 +36,15 @@ type Client struct {
 	conn        *websocket.Conn
 	nick        string
 	fingerprint string
+	tagline     string
 	send        chan []byte
+}
+
+type UserStatus struct {
+	Nick        string `json:"nick"`
+	Fingerprint string `json:"fingerprint"`
+	Tagline     string `json:"tagline"`
+	LastSeen    int64  `json:"last_seen"`
 }
 
 type Hub struct {
@@ -56,7 +65,7 @@ func newHub() *Hub {
 }
 
 func (h *Hub) run(ctx context.Context) {
-	// Subscribe to Redis pub/sub
+	// Try to subscribe to Redis pub/sub, but don't fail if it's not available
 	pubsub := rdb.Subscribe(ctx, "vibechat:messages")
 	defer pubsub.Close()
 
@@ -64,9 +73,10 @@ func (h *Hub) run(ctx context.Context) {
 		for {
 			msg, err := pubsub.ReceiveMessage(ctx)
 			if err != nil {
-				log.Printf("Redis pubsub error: %v", err)
+				log.Printf("Redis pubsub error (will use direct broadcast): %v", err)
 				return
 			}
+			log.Printf("Received from Redis pub/sub: %s", msg.Payload)
 			h.broadcast <- []byte(msg.Payload)
 		}
 	}()
@@ -79,6 +89,7 @@ func (h *Hub) run(ctx context.Context) {
 			h.mu.Lock()
 			h.clients[client] = true
 			h.mu.Unlock()
+			log.Printf("Client registered: %s (total: %d)", client.nick, len(h.clients))
 			h.broadcastUserList()
 		case client := <-h.unregister:
 			h.mu.Lock()
@@ -87,18 +98,22 @@ func (h *Hub) run(ctx context.Context) {
 				close(client.send)
 			}
 			h.mu.Unlock()
+			log.Printf("Client unregistered: %s (total: %d)", client.nick, len(h.clients))
 			h.broadcastUserList()
 		case message := <-h.broadcast:
-			h.mu.RLock()
+			h.mu.Lock()
+			log.Printf("Broadcasting to %d clients: %s", len(h.clients), string(message))
 			for client := range h.clients {
 				select {
 				case client.send <- message:
+					log.Printf("Sent to client %s", client.nick)
 				default:
+					log.Printf("Failed to send to client %s, closing", client.nick)
 					close(client.send)
 					delete(h.clients, client)
 				}
 			}
-			h.mu.RUnlock()
+			h.mu.Unlock()
 		}
 	}
 }
@@ -110,6 +125,7 @@ func (h *Hub) broadcastUserList() {
 		users = append(users, map[string]string{
 			"nick":        client.nick,
 			"fingerprint": client.fingerprint,
+			"tagline":     client.tagline,
 		})
 	}
 	h.mu.RUnlock()
@@ -124,6 +140,7 @@ func (h *Hub) broadcastUserList() {
 
 func (c *Client) readPump(hub *Hub) {
 	defer func() {
+		log.Printf("[WS] Client %s disconnected", c.nick)
 		hub.unregister <- c
 		c.conn.Close()
 	}()
@@ -161,7 +178,9 @@ func (c *Client) writePump() {
 				return
 			}
 
+			log.Printf("[WS] Sending to %s: %s", c.nick, string(message))
 			if err := c.conn.WriteMessage(websocket.TextMessage, message); err != nil {
+				log.Printf("[WS] Error sending to %s: %v", c.nick, err)
 				return
 			}
 		case <-ticker.C:
@@ -196,6 +215,7 @@ func handleWebSocket(hub *Hub) http.HandlerFunc {
 			send:        make(chan []byte, 256),
 		}
 
+		log.Printf("[WS] New connection: %s (fingerprint: %s)", nick, fingerprint)
 		hub.register <- client
 
 		go client.writePump()
@@ -203,42 +223,53 @@ func handleWebSocket(hub *Hub) http.HandlerFunc {
 	}
 }
 
-func handlePostMessage(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
+func handlePostMessage(hub *Hub) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
 
-	var msg Message
-	if err := json.NewDecoder(r.Body).Decode(&msg); err != nil {
-		http.Error(w, "Invalid request body", http.StatusBadRequest)
-		return
-	}
+		var msg Message
+		if err := json.NewDecoder(r.Body).Decode(&msg); err != nil {
+			http.Error(w, "Invalid request body", http.StatusBadRequest)
+			return
+		}
 
-	msg.Timestamp = time.Now().UnixMilli()
+		msg.Timestamp = time.Now().UnixMilli()
 
-	// Save to Redis with 24h TTL
-	ctx := context.Background()
-	key := fmt.Sprintf("vibechat:msg:%d", msg.Timestamp)
-	data, _ := json.Marshal(msg)
-	if err := rdb.Set(ctx, key, data, 24*time.Hour).Err(); err != nil {
-		log.Printf("Redis set error: %v", err)
-		http.Error(w, "Failed to save message", http.StatusInternalServerError)
-		return
-	}
+		// Save to Redis with 24h TTL
+		ctx := context.Background()
+		key := fmt.Sprintf("vibechat:msg:%d", msg.Timestamp)
+		data, _ := json.Marshal(msg)
+		if err := rdb.Set(ctx, key, data, 24*time.Hour).Err(); err != nil {
+			log.Printf("Redis set error: %v", err)
+			http.Error(w, "Failed to save message", http.StatusInternalServerError)
+			return
+		}
 
-	// Publish to pub/sub
-	msgData := map[string]interface{}{
-		"type":    "message",
-		"message": msg,
-	}
-	pubData, _ := json.Marshal(msgData)
-	if err := rdb.Publish(ctx, "vibechat:messages", pubData).Err(); err != nil {
-		log.Printf("Redis publish error: %v", err)
-	}
+		// Prepare message data
+		msgData := map[string]interface{}{
+			"type":    "message",
+			"message": msg,
+		}
+		pubData, _ := json.Marshal(msgData)
 
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(msg)
+		// Try to publish to Redis pub/sub (for multi-instance setups)
+		// If publish succeeds, Redis pub/sub will broadcast to all instances
+		// If it fails, fall back to direct broadcast for single instance
+		log.Printf("Publishing to Redis: %s", string(pubData))
+		if err := rdb.Publish(ctx, "vibechat:messages", pubData).Err(); err != nil {
+			log.Printf("Redis publish error (using direct broadcast): %v", err)
+			// Only broadcast directly if Redis pub/sub failed
+			hub.broadcast <- pubData
+		} else {
+			log.Printf("Successfully published to Redis")
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(msg)
+	}
 }
 
 func handleGetMessages(w http.ResponseWriter, r *http.Request) {
@@ -266,6 +297,144 @@ func handleGetMessages(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(messages)
 }
 
+// cleanupOldMessages keeps only the latest 500 messages
+func cleanupOldMessages(ctx context.Context) {
+	keys, err := rdb.Keys(ctx, "vibechat:msg:*").Result()
+	if err != nil {
+		log.Printf("Failed to get message keys for cleanup: %v", err)
+		return
+	}
+
+	// If we have 500 or fewer messages, nothing to clean up
+	if len(keys) <= 500 {
+		return
+	}
+
+	// Parse timestamps from keys and sort
+	type keyTime struct {
+		key       string
+		timestamp int64
+	}
+
+	keyTimes := make([]keyTime, 0, len(keys))
+	for _, key := range keys {
+		var ts int64
+		if _, err := fmt.Sscanf(key, "vibechat:msg:%d", &ts); err == nil {
+			keyTimes = append(keyTimes, keyTime{key: key, timestamp: ts})
+		}
+	}
+
+	// Sort by timestamp (oldest first)
+	sort.Slice(keyTimes, func(i, j int) bool {
+		return keyTimes[i].timestamp < keyTimes[j].timestamp
+	})
+
+	// Delete oldest messages to keep only 500
+	toDelete := len(keyTimes) - 500
+	if toDelete > 0 {
+		deleted := 0
+		for i := 0; i < toDelete; i++ {
+			if err := rdb.Del(ctx, keyTimes[i].key).Err(); err != nil {
+				log.Printf("Failed to delete old message %s: %v", keyTimes[i].key, err)
+			} else {
+				deleted++
+			}
+		}
+		log.Printf("Cleanup: deleted %d old messages (total was %d, now %d)", deleted, len(keys), len(keys)-deleted)
+	}
+}
+
+// startMessageCleanup runs a background job to cleanup old messages
+func startMessageCleanup(ctx context.Context) {
+	ticker := time.NewTicker(10 * time.Second)
+	go func() {
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				cleanupOldMessages(ctx)
+			}
+		}
+	}()
+}
+
+func handleUpdateTagline(hub *Hub) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+
+		var req struct {
+			Nick        string `json:"nick"`
+			Fingerprint string `json:"fingerprint"`
+			Tagline     string `json:"tagline"`
+		}
+
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, "Invalid request body", http.StatusBadRequest)
+			return
+		}
+
+		// Limit tagline length
+		if len(req.Tagline) > 30 {
+			req.Tagline = req.Tagline[:30]
+		}
+
+		// Update the client's tagline if connected
+		hub.mu.Lock()
+		for client := range hub.clients {
+			if client.nick == req.Nick && client.fingerprint == req.Fingerprint {
+				client.tagline = req.Tagline
+				log.Printf("[Tagline] %s set to: %s", client.nick, req.Tagline)
+				break
+			}
+		}
+		hub.mu.Unlock()
+
+		// Broadcast updated user list
+		hub.broadcastUserList()
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
+	}
+}
+
+func handleTyping(hub *Hub) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+
+		var req struct {
+			Nick        string `json:"nick"`
+			Fingerprint string `json:"fingerprint"`
+			IsTyping    bool   `json:"is_typing"`
+		}
+
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, "Invalid request body", http.StatusBadRequest)
+			return
+		}
+
+		// Broadcast typing indicator
+		typingData := map[string]interface{}{
+			"type":        "typing",
+			"nick":        req.Nick,
+			"fingerprint": req.Fingerprint,
+			"is_typing":   req.IsTyping,
+		}
+		data, _ := json.Marshal(typingData)
+		hub.broadcast <- data
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
+	}
+}
+
 func main() {
 	ctx := context.Background()
 
@@ -287,17 +456,23 @@ func main() {
 	hub := newHub()
 	go hub.run(ctx)
 
+	// Start message cleanup job (keeps only 500 latest messages)
+	startMessageCleanup(ctx)
+
 	mux := http.NewServeMux()
-	mux.HandleFunc("/ws", handleWebSocket(hub))
+	mux.HandleFunc("/api/ws", handleWebSocket(hub))
 	mux.HandleFunc("/api/chat/messages", func(w http.ResponseWriter, r *http.Request) {
-		if r.Method == http.MethodPost {
-			handlePostMessage(w, r)
-		} else if r.Method == http.MethodGet {
+		switch r.Method {
+		case http.MethodPost:
+			handlePostMessage(hub)(w, r)
+		case http.MethodGet:
 			handleGetMessages(w, r)
-		} else {
+		default:
 			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		}
 	})
+	mux.HandleFunc("/api/user/tagline", handleUpdateTagline(hub))
+	mux.HandleFunc("/api/user/typing", handleTyping(hub))
 	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 		w.Write([]byte("OK"))

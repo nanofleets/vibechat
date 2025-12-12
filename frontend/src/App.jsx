@@ -2,20 +2,11 @@ import Fingerprint2 from 'fingerprintjs2'
 import { useEffect, useRef, useState } from 'react'
 import './App.css'
 
-const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:8080'
-const WS_URL = import.meta.env.VITE_WS_URL || 'ws://localhost:8080'
+// Always use same domain for API (relative path)
+const API_URL = ''
 
-function getCookie(name) {
-  const value = `; ${document.cookie}`
-  const parts = value.split(`; ${name}=`)
-  if (parts.length === 2) return parts.pop().split(';').shift()
-  return null
-}
-
-function setCookie(name, value, days = 365) {
-  const expires = new Date(Date.now() + days * 864e5).toUTCString()
-  document.cookie = `${name}=${value}; expires=${expires}; path=/`
-}
+// Construct WebSocket URL based on current protocol and host
+const WS_URL = `${window.location.protocol === 'https:' ? 'wss:' : 'ws:'}//${window.location.host}`
 
 function App() {
   const [nick, setNick] = useState('')
@@ -37,13 +28,6 @@ function App() {
       const fp = Fingerprint2.x64hash128(values.join(''), 31)
       setFingerprint(fp)
     })
-
-    // Check for existing nick in cookie
-    const savedNick = getCookie('vibechat_nick')
-    if (savedNick) {
-      setNick(savedNick)
-      setHasNick(true)
-    }
   }, [])
 
   useEffect(() => {
@@ -74,7 +58,7 @@ function App() {
   }
 
   const connectWebSocket = () => {
-    const ws = new WebSocket(`${WS_URL}/ws?nick=${encodeURIComponent(nick)}&fingerprint=${encodeURIComponent(fingerprint)}`)
+    const ws = new WebSocket(`${WS_URL}/api/ws?nick=${encodeURIComponent(nick)}&fingerprint=${encodeURIComponent(fingerprint)}`)
     
     ws.onopen = () => {
       setWsStatus('connected')
@@ -103,7 +87,11 @@ function App() {
         if (data.type === 'message') {
           setMessages(prev => [...prev, data.message])
         } else if (data.type === 'userlist') {
-          setUsers(data.users || [])
+          // Sort users by nick to keep list stable
+          const sortedUsers = (data.users || []).sort((a, b) => 
+            a.nick.localeCompare(b.nick)
+          )
+          setUsers(sortedUsers)
         }
       } catch (error) {
         console.error('Failed to parse message:', error)
@@ -116,7 +104,6 @@ function App() {
   const handleSetNick = (e) => {
     e.preventDefault()
     if (nick.trim()) {
-      setCookie('vibechat_nick', nick)
       setHasNick(true)
     }
   }
@@ -197,7 +184,12 @@ function App() {
                 onMouseLeave={() => setHoveredUser(null)}
                 title={user.fingerprint}
               >
-                <span className="user-nick">{user.nick}</span>
+                <div className="user-info">
+                  <span className="user-nick">{user.nick}</span>
+                  {user.tagline && (
+                    <span className="user-tagline">{user.tagline}</span>
+                  )}
+                </div>
                 {hoveredUser?.nick === user.nick && (
                   <span className="user-fingerprint">
                     {user.fingerprint.substring(0, 8)}...

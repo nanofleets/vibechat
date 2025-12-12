@@ -1,14 +1,15 @@
-.PHONY: build push build-backend build-frontend push-backend push-frontend
+.PHONY: build push build-backend build-frontend build-utils push-backend push-frontend push-utils
 
 # GitHub Container Registry settings
 REGISTRY := ghcr.io
 OWNER := nanofleets
 BACKEND_IMAGE := $(REGISTRY)/$(OWNER)/vibechat-backend
 FRONTEND_IMAGE := $(REGISTRY)/$(OWNER)/vibechat-frontend
+UTILS_IMAGE := $(REGISTRY)/$(OWNER)/vibechat-utils
 TAG := latest
 
-# Build both images
-build: build-backend build-frontend
+# Build all images
+build: build-backend build-frontend build-utils
 
 # Build backend image
 build-backend:
@@ -26,8 +27,16 @@ build-frontend:
 		-f frontend/Dockerfile \
 		frontend/
 
-# Push both images
-push: push-backend push-frontend
+# Build utils image
+build-utils:
+	docker build \
+		--platform linux/arm64 \
+		-t $(UTILS_IMAGE):$(TAG) \
+		-f utils/Dockerfile \
+		utils/
+
+# Push all images
+push: push-backend push-frontend push-utils
 
 # Push backend image
 push-backend:
@@ -56,6 +65,20 @@ push-frontend:
 		-f frontend/Dockerfile \
 		frontend/
 	docker push $(FRONTEND_IMAGE):$(TAG)
+
+# Push utils image
+push-utils:
+	@if [ -z "$(GH_TOKEN)" ]; then \
+		echo "Error: GH_TOKEN environment variable is not set."; \
+		exit 1; \
+	fi
+	echo $(GH_TOKEN) | docker login $(REGISTRY) -u $(OWNER) --password-stdin
+	docker build \
+		--platform linux/arm64 \
+		-t $(UTILS_IMAGE):$(TAG) \
+		-f utils/Dockerfile \
+		utils/
+	docker push $(UTILS_IMAGE):$(TAG)
 
 # Start development environment
 dev:
